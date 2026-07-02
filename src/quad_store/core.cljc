@@ -13,8 +13,7 @@
   caller passes a `ref?` predicate to `assert-quad`/`retract-quad`; quads
   asserted without one are simply not reverse-indexed."
   (:require [prolly-tree.core :as pt]
-            [multiformats.core :as mf]
-            [cbor.core :as cbor]))
+            [ipld.core :as ipld]))
 
 (defn empty-db [] {:spo {} :pso {} :pos {} :ocp {}})
 
@@ -82,17 +81,15 @@
 (defn commit!
   "Snapshot `db`'s 4 indices into 4 prolly-trees via `put!`
   (`prolly-tree.core`-shaped port: `(put! cid bytes)`), CID-address the
-  commit itself (dag-cbor of `{index-roots prev}`), and return the commit
-  CID string. `prev` is the previous commit CID, or nil for the first
-  commit. Content-addressed: committing the same `db` + `prev` twice
-  returns the same CID."
+  commit itself (dag-cbor of `{index-roots prev}`, where every root and
+  `prev` is a REAL tag-42 IPLD link via `kotoba-lang/ipld` -- an empty
+  index snapshots as null), and return the commit CID string. `prev` is
+  the previous commit CID, or nil for the first commit. Content-addressed:
+  committing the same `db` + `prev` twice returns the same CID."
   [put! db prev]
-  (let [roots {"spo" (index-root put! (:spo db))
-               "pso" (index-root put! (:pso db))
-               "pos" (index-root put! (:pos db))
-               "ocp" (index-root put! (:ocp db))}
-        commit {"index-roots" roots "prev" prev}
-        bytes (cbor/encode commit)
-        cid (mf/cidv1-dag-cbor bytes)]
-    (put! cid bytes)
-    cid))
+  (let [->link #(some-> % ipld/link)          ; empty index -> nil root -> null
+        roots {"spo" (->link (index-root put! (:spo db)))
+               "pso" (->link (index-root put! (:pso db)))
+               "pos" (->link (index-root put! (:pos db)))
+               "ocp" (->link (index-root put! (:ocp db)))}]
+    (ipld/put-node! put! {"index-roots" roots "prev" (->link prev)})))

@@ -1,7 +1,9 @@
 (ns quad-store.core-test
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.string :as str]
-            [quad-store.core :as qs]))
+            [quad-store.core :as qs]
+            [multiformats.core :as mf]
+            [ipld.core :as ipld]))
 
 (defn- mem-store []
   (let [store (atom {})]
@@ -45,8 +47,28 @@
     (testing "same db + prev -> same commit CID"
       (is (= cid1 cid2)))
     (testing "different prev -> different commit CID"
-      (is (not= cid1 (qs/commit! put! db "some-other-prev"))))
+      (is (not= cid1 (qs/commit! put! db (mf/kotoba-cid "some-other-prev")))))
     (testing "different db -> different commit CID"
       (let [db2 (qs/assert-quad db {:s "carol" :p "role" :o "user"})]
         (is (not= cid1 (qs/commit! put! db2 nil)))))
     (is (contains? @store cid1))))
+
+(deftest commit-block-is-real-ipld
+  (let [{:keys [put! get-fn]} (mem-store)
+        db (-> (qs/empty-db)
+               (qs/assert-quad {:s "alice" :p "role" :o "admin"}))
+        prev (qs/commit! put! (qs/empty-db) nil)
+        cid (qs/commit! put! db prev)
+        node (ipld/decode (get-fn cid))]
+    (testing "index roots and prev are tag-42 links (nil for empty indexes)"
+      (is (ipld/link? (get-in node ["index-roots" "spo"])))
+      (is (ipld/link? (get node "prev")))
+      (is (= prev (ipld/link-cid (get node "prev")))))
+    (testing "generic ipld/links walk reaches every root + prev, all fetchable"
+      (is (seq (ipld/links node)))
+      (doseq [c (ipld/links node)]
+        (is (= c (ipld/cid (get-fn c))))))
+    (testing "empty db commit has null roots"
+      (let [n0 (ipld/decode (get-fn prev))]
+        (is (nil? (get-in n0 ["index-roots" "spo"])))
+        (is (nil? (get n0 "prev")))))))

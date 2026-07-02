@@ -41,6 +41,13 @@ actually survives `cbor.core` encode/decode. Typed values are a follow-up.
 - `commit!` snapshots each index to a `prolly-tree` and CID-addresses the
   commit as `{index-roots prev}` — a real commit chain, content-addressed
   (verified by test: same db+prev always yields the same commit CID).
+  Index roots and `prev` are **real tag-42 IPLD links** (via
+  [`kotoba-lang/ipld`](https://github.com/kotoba-lang/ipld); empty index →
+  null), so a generic IPLD tool — or `ipld.core/links` — walks from a
+  commit block to every index tree with no quad-store schema knowledge.
+  This replaced the first landing's plain-CID-string encoding; every
+  commit CID changed (clean break, nothing in production consumed the old
+  format — see superproject ADR).
 
 **Not in this landing** (tracked follow-ups, not silently omitted):
 - Cold (post-commit, prolly-tree-backed) query — the 4 index roots are
