@@ -108,3 +108,11 @@
       (let [n0 (ipld/decode (get-fn prev))]
         (is (nil? (get-in n0 ["index-roots" "spo"])))
         (is (nil? (get n0 "prev")))))))
+
+(deftest commit-node-carries-schema-version
+  ;; ADR-2607050500 "Schema evolution": a marker for future incompatible
+  ;; index-shape changes to key a migration off of. Purely additive.
+  (let [{:keys [put! get-fn]} (mem-store)
+        cid (qs/commit! put! (qs/empty-db) nil)
+        node (ipld/decode (get-fn cid))]
+    (is (= qs/current-schema-version (get node "schema-version")))))
