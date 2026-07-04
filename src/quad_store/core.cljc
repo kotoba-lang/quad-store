@@ -3,15 +3,19 @@
   naming as the deleted kotoba-query Rust crate's EAVT/AEVT/AVET/VAET
   indices -- plus CID-addressed commit snapshotting via `prolly-tree.core`.
 
-  A quad is `{:s subject :p predicate :o object}`. For this landing s/p/o
-  are treated as opaque strings (typed values are a follow-up: dag-cbor
-  round-trips strings exactly but not e.g. keywords, so string-only keeps
-  `commit!`'s snapshot honest about what actually survives encode/decode).
+  A quad is `{:s subject :p predicate :o object}`. s/p/o are still treated
+  as opaque values for indexing purposes (general typed-value support --
+  int/bytes/bool beyond string and `ipld.core/Link` -- remains a follow-up),
+  but an `ipld.core/Link` value is now recognized and preserved end to end:
+  through the hot db, through a commit snapshot's index-root (`index-root`
+  below), and back out again on a cold read (see `kotoba-lang/kotobase-
+  engine`'s `cold-datoms`/`hydrate-db`, which call `edn->link` on read).
 
-  `:o` values that are themselves CIDs (references to other entities) are
-  additionally indexed in `ocp` for reverse-reference lookup when the
-  caller passes a `ref?` predicate to `assert-quad`/`retract-quad`; quads
-  asserted without one are simply not reverse-indexed."
+  `:o` values that are references to other entities are additionally
+  indexed in `ocp` for reverse-reference lookup when `ref?` (default:
+  `ipld.core/link?`, ADR-2607023200 §6-4 -- \"ref? naturalizes to: is the
+  value a Link\") says so; a caller can still pass a different predicate to
+  `assert-quad`/`retract-quad` to opt out or widen it."
   (:require [prolly-tree.core :as pt]
             [ipld.core :as ipld]))
 
@@ -30,9 +34,10 @@
     m))
 
 (defn assert-quad
-  "Add `{:s :p :o}` to `db`'s 4 indices. `ref?` (default: never) decides
-  whether `:o` is also indexed in `:ocp` for reverse-reference lookup."
-  ([db q] (assert-quad db q (constantly false)))
+  "Add `{:s :p :o}` to `db`'s 4 indices. `ref?` (default: `ipld.core/link?`)
+  decides whether `:o` is also indexed in `:ocp` for reverse-reference
+  lookup."
+  ([db q] (assert-quad db q ipld/link?))
   ([db {:keys [s p o]} ref?]
    (cond-> db
      true     (update :spo upd s p o)
@@ -42,7 +47,7 @@
 
 (defn retract-quad
   "Remove `{:s :p :o}` from `db`'s 4 indices."
-  ([db q] (retract-quad db q (constantly false)))
+  ([db q] (retract-quad db q ipld/link?))
   ([db {:keys [s p o]} ref?]
    (cond-> db
      true     (update :spo rm s p o)
@@ -67,15 +72,36 @@
   only populated for quads asserted with a truthy `ref?`."
   [db o] (get (:ocp db) o {}))
 
+;; ── Link <-> EDN-safe round-trip ─────────────────────────────────────────────
+;; `ipld.core/Link` is a bare deftype with no reader/print-method (by design --
+;; the codebase's `dag-cbor`/`ipld` layer round-trips Links via CBOR tag 42,
+;; never via a JVM/cljs-specific reader macro). `index-root` below persists
+;; keys through `pr-str`/`edn/read-string` (a prolly-tree leaf key, not a
+;; dag-cbor block), so a raw Link would NOT survive that round-trip. Represent
+;; it instead as a plain 2-vector `["ipld/link" cid]` -- ordinary, portable EDN
+;; that needs no custom reader on either JVM or ClojureScript.
+(defn link->edn
+  "A Link becomes `[\"ipld/link\" cid]`; anything else passes through."
+  [v] (if (ipld/link? v) ["ipld/link" (ipld/link-cid v)] v))
+
+(defn edn->link
+  "Inverse of `link->edn`: reconstructs the Link, or passes through anything
+  that isn't the `[\"ipld/link\" cid]` shape."
+  [v] (if (and (vector? v) (= 2 (count v)) (= "ipld/link" (first v)))
+        (ipld/link (second v))
+        v))
+
 (defn- index-root
   "Flatten one index map into sorted `[key val]` prolly-tree entries and
-  build a tree from it. `key` is the printed `[k1 k2 v]` triple so the
-  whole index is content-addressed by its full (s,p,o)-equivalent set;
-  `val` is `true` (membership-only encoding, no separate value payload)."
+  build a tree from it. `key` is the printed `[k1 k2 v]` triple (each
+  position passed through `link->edn` first, so a Link value survives the
+  `pr-str` round-trip) so the whole index is content-addressed by its full
+  (s,p,o)-equivalent set; `val` is `true` (membership-only encoding, no
+  separate value payload)."
   [put! m]
   (let [entries (sort-by first
                          (for [[k1 m2] m [k2 vs] m2 v vs]
-                           [(pr-str [k1 k2 v]) true]))]
+                           [(pr-str [(link->edn k1) (link->edn k2) (link->edn v)]) true]))]
     (pt/build-tree put! entries)))
 
 (defn commit!
