@@ -1,8 +1,10 @@
 (ns quad-store.core-test
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.string :as str]
+            #?(:clj [clojure.edn :as edn] :cljs [cljs.reader :as edn])
             [quad-store.core :as qs]
             [multiformats.core :as mf]
+            [prolly-tree.core :as pt]
             [ipld.core :as ipld]))
 
 (defn- mem-store []
@@ -36,6 +38,40 @@
                (qs/assert-quad {:s "alice" :p "name" :o "Alice"} ref?))]
     (is (= {"knows" #{"alice"}} (qs/refs-to db "bafybob")))
     (is (= {} (qs/refs-to db "Alice")) "non-ref object is not reverse-indexed")))
+
+(def ^:private bafy-link
+  (ipld/link "bafyreiaakutsdtndrl7e7emcmkp5hjsaaq2vu6prfelbgaglprvtdon63m"))
+
+(deftest ref-indexing-naturalizes-to-ipld-link
+  ;; ADR-2607050200: ref? defaults to ipld/link? instead of requiring every
+  ;; caller to pass its own predicate (ADR-2607023200 §6-4).
+  (let [db (-> (qs/empty-db)
+               (qs/assert-quad {:s "alice" :p "knows" :o bafy-link})
+               (qs/assert-quad {:s "alice" :p "name" :o "Alice"}))]
+    (testing "default ref? indexes Link values automatically"
+      (is (= {"knows" #{"alice"}} (qs/refs-to db bafy-link))))
+    (testing "a plain string is never mistaken for a ref, even one shaped like a CID"
+      (is (= {} (qs/refs-to db "Alice"))))
+    (testing "retract-quad's matching default un-indexes it"
+      (let [db2 (qs/retract-quad db {:s "alice" :p "knows" :o bafy-link})]
+        (is (= {} (qs/refs-to db2 bafy-link)))))))
+
+(deftest link-edn-safe-roundtrip
+  (testing "a Link survives pr-str/edn-read-string via the edn-safe form"
+    (is (= bafy-link (qs/edn->link (edn/read-string (pr-str (qs/link->edn bafy-link)))))))
+  (testing "non-Link values pass through both directions unchanged"
+    (is (= "alice" (qs/link->edn "alice")))
+    (is (= "alice" (qs/edn->link "alice")))))
+
+(deftest commit-preserves-link-values-through-index-root
+  (let [{:keys [put! get-fn]} (mem-store)
+        db (qs/assert-quad (qs/empty-db) {:s "alice" :p "knows" :o bafy-link})
+        cid (qs/commit! put! db nil)
+        node (ipld/decode (get-fn cid))
+        spo-root (ipld/link-cid (get-in node ["index-roots" "spo"]))
+        [[leaf-key _]] (pt/scan-prefix get-fn spo-root "")
+        [_ _ v] (mapv qs/edn->link (edn/read-string leaf-key))]
+    (is (= bafy-link v) "the Link comes back out of the persisted index intact")))
 
 (deftest commit-is-content-addressed
   (let [{:keys [put! store]} (mem-store)
