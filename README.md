@@ -60,6 +60,10 @@ Link` value, which *is* recognized and preserved end to end — see
   `by-predicate-value`/`refs-to`, pattern query via `arrangement.query/
   query` (routes `[s p o]` to whichever index matches the bound
   positions).
+- `arrangement.datalog/q` — Datomic-shaped `{:find [?var ...] :where
+  [[e a v] ...]}` conjunctive multi-clause join over `arrangement.query`
+  (nested-loop join, variable binding/unification across clauses, `_`
+  wildcard). First stage of the staged Datalog roadmap below.
 - `commit!` snapshots each index to a `prolly-tree` and CID-addresses the
   commit as `{schema-version index-roots prev}` — a real commit chain,
   content-addressed (verified by test: same db+prev+schema-version always
@@ -78,8 +82,10 @@ Link` value, which *is* recognized and preserved end to end — see
   `kotoba-lang/kotobase-peer`'s `cold-datoms` for a filtered cold read
   that doesn't need one).
 - General typed values beyond string + `ipld.core/Link`.
-- Full Datalog fixpoint / SPARQL BGP evaluation — `arrangement.query`'s
-  own documented scope is triple-pattern only.
+- Negation (`not` clauses), aggregation (`:with`/`count`/`sum` etc. in
+  `:find`), and recursive rules (`:rules` + naive/semi-naive fixpoint) on
+  top of `arrangement.datalog/q`'s conjunctive join — staged roadmap, see
+  the full-Datalog ADR.
 
 ## Test
 
