@@ -101,15 +101,36 @@
 
 (defn- index-root
   "Flatten one index map into sorted `[key val]` prolly-tree entries and
-  build a tree from it. `key` is the printed `[k1 k2 v]` triple (each
-  position passed through `link->edn` first, so a Link value survives the
-  `pr-str` round-trip) so the whole index is content-addressed by its full
-  (s,p,o)-equivalent set; `val` is `true` (membership-only encoding, no
-  separate value payload)."
-  [put! m]
+  build a tree from it (ADR-2607051000, ciphertext-over-CID persistence:
+  accepted 2026-07-06, this fn implements its corrected key/value split —
+  see ADR-2607061800's addendum for why the original ADR text was wrong
+  about the value slot).
+
+  `key` is `(pr-str [(blind-fn k1') (blind-fn k2') (blind-fn v')])` (each
+  position passed through `link->edn` first, then `blind-fn` — a keyed,
+  deterministic MAC, e.g. HMAC-SHA256 — so the leaf key is queryable by
+  prefix for a caller who already knows the plaintext component, but is
+  NOT the plaintext, and is NOT order-preserving/full ciphertext).
+
+  `val` is `(encrypt-fn (ipld/encode [k1' k2' v']))` — an AEAD ciphertext
+  blob of the REAL `(k1' k2' v')` triple. This is the correction: the
+  ORIGINAL triple lived only in the (now-blinded, one-way, unrecoverable)
+  key, so once the key stopped being plaintext there was nowhere left to
+  read the actual s/p/o payload back from — `val` now carries it,
+  encrypted, so `cold-datoms` (in `kotoba-lang/kotobase-peer`) can decrypt
+  a matched leaf's value to reconstruct the row instead of trying to
+  invert the key.
+
+  `blind-fn`/`encrypt-fn` are REQUIRED (no default — matching this
+  codebase's no-silent-default stance, ADR-2607050700, same as
+  `schema-version` below): `(blind-fn link-edn-component) -> string`,
+  `(encrypt-fn bytes) -> bytes`."
+  [put! m blind-fn encrypt-fn]
   (let [entries (sort-by first
-                         (for [[k1 m2] m [k2 vs] m2 v vs]
-                           [(pr-str [(link->edn k1) (link->edn k2) (link->edn v)]) true]))]
+                         (for [[k1 m2] m [k2 vs] m2 v vs
+                               :let [k1' (link->edn k1) k2' (link->edn k2) v' (link->edn v)]]
+                           [(pr-str [(blind-fn k1') (blind-fn k2') (blind-fn v')])
+                            (encrypt-fn (ipld/encode [k1' k2' v']))]))]
     (pt/build-tree put! entries)))
 
 (def current-schema-version
@@ -133,12 +154,16 @@
   caller-declared choice, not a silently-assumed default) -- pass
   `current-schema-version` if you have no other version in mind, but state
   it. Content-addressed: committing the same `db` + `prev` + `schema-
-  version` twice returns the same CID."
-  [put! db prev schema-version]
+  version` twice returns the same CID.
+
+  `blind-fn`/`encrypt-fn` are REQUIRED (ADR-2607051000, accepted
+  2026-07-06) and threaded unchanged to `index-root` for all 4 indices —
+  see `index-root`'s docstring for their contract."
+  [put! db prev schema-version blind-fn encrypt-fn]
   (let [->link #(some-> % ipld/link)          ; empty index -> nil root -> null
-        roots {"spo" (->link (index-root put! (:spo db)))
-               "pso" (->link (index-root put! (:pso db)))
-               "pos" (->link (index-root put! (:pos db)))
-               "ocp" (->link (index-root put! (:ocp db)))}]
+        roots {"spo" (->link (index-root put! (:spo db) blind-fn encrypt-fn))
+               "pso" (->link (index-root put! (:pso db) blind-fn encrypt-fn))
+               "pos" (->link (index-root put! (:pos db) blind-fn encrypt-fn))
+               "ocp" (->link (index-root put! (:ocp db) blind-fn encrypt-fn))}]
     (ipld/put-node! put! {"schema-version" schema-version
                           "index-roots" roots "prev" (->link prev)})))
